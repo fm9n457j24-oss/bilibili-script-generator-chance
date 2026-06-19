@@ -14,6 +14,7 @@ document.addEventListener("DOMContentLoaded", () => {
     document.getElementById("btnSaveConfig").addEventListener("click", saveConfig);
     document.getElementById("btnGenerate").addEventListener("click", startGenerate);
     document.getElementById("btnAdminLogin").addEventListener("click", adminLogin);
+    document.getElementById("btnTestAi").addEventListener("click", testAiConnection);
 });
 
 // ------------------------------------------------------------------ //
@@ -123,6 +124,61 @@ async function saveConfig() {
     } catch (e) {
         document.getElementById("configStatus").textContent = "✗ 保存失败";
     }
+}
+
+// ------------------------------------------------------------------ //
+//  AI 连接测试
+// ------------------------------------------------------------------ //
+async function testAiConnection() {
+    const btn = document.getElementById("btnTestAi");
+    const resultDiv = document.getElementById("testAiResult");
+
+    btn.disabled = true;
+    btn.textContent = "⏳ 测试中...";
+    resultDiv.style.display = "block";
+    resultDiv.innerHTML = '<p style="color:#6b7280;">正在测试 AI 接口连接...</p>';
+
+    try {
+        const resp = await fetch("/api/test-ai", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({}),
+        });
+        const data = await resp.json();
+
+        if (data.ok) {
+            resultDiv.innerHTML = `
+                <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:16px;">
+                    <p style="color:#166534;font-weight:600;">✓ ${data.message}</p>
+                    <p style="color:#166534;font-size:13px;margin-top:8px;">模型回复：${data.reply || '(空)'}</p>
+                    <p style="color:#6b7280;font-size:12px;margin-top:8px;">
+                        Base URL: ${data.base_url}<br>
+                        文本模型: ${data.model}<br>
+                        视觉模型: ${data.vision_model}
+                    </p>
+                </div>`;
+        } else {
+            resultDiv.innerHTML = `
+                <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:16px;">
+                    <p style="color:#991b1b;font-weight:600;">✗ AI 接口连接失败</p>
+                    <p style="color:#991b1b;font-size:13px;margin-top:8px;white-space:pre-wrap;">${data.error || '未知错误'}</p>
+                    <p style="color:#6b7280;font-size:12px;margin-top:8px;">
+                        Base URL: ${data.base_url || '未配置'}<br>
+                        模型: ${data.model || '未配置'}<br>
+                        HTTP 状态码: ${data.status_code || 'N/A'}
+                    </p>
+                </div>`;
+        }
+    } catch (e) {
+        resultDiv.innerHTML = `
+            <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:16px;">
+                <p style="color:#991b1b;font-weight:600;">✗ 请求失败</p>
+                <p style="color:#991b1b;font-size:13px;">${e.message}</p>
+            </div>`;
+    }
+
+    btn.disabled = false;
+    btn.textContent = "🔌 测试 AI 连接";
 }
 
 // ------------------------------------------------------------------ //

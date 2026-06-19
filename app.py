@@ -23,7 +23,7 @@ from flask import Flask, request, jsonify, send_file, render_template, session
 from config import Config
 from core.downloader import download_video, DownloadError
 from core.extractor import extract_frames, sample_frames_for_vision, cleanup_frames
-from core.analyzer import analyze_and_generate, AnalyzerError
+from core.analyzer import analyze_and_generate, AnalyzerError, test_ai_connection
 from core.docx_writer import generate_docx
 from core.task_store import create_task, update_task, get_task, cleanup_old_tasks
 
@@ -227,6 +227,16 @@ def admin_login():
 def admin_logout():
     session.pop("is_admin", None)
     return jsonify({"ok": True})
+
+
+@app.route("/api/test-ai", methods=["POST"])
+def api_test_ai():
+    """测试 AI 接口连接是否正常"""
+    try:
+        result = test_ai_connection()
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/generate", methods=["POST"])

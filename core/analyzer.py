@@ -9,10 +9,14 @@ AI 内容分析 & 脚本生成模块
 import os
 import json
 import base64
+import time
+import logging
 import requests
 from typing import List, Tuple
 
 from config import Config
+
+logger = logging.getLogger(__name__)
 
 
 class AnalyzerError(Exception):
@@ -23,12 +27,15 @@ class AnalyzerError(Exception):
 #  内部：调用 OpenAI 兼容接口
 # ------------------------------------------------------------------ #
 def _call_ai(messages: list, model: str = None, temperature: float = 0.7,
-             max_tokens: int = 4096, response_format_json: bool = False) -> str:
-    """调用 OpenAI 兼容的 chat completions 接口"""
+             max_tokens: int = 4096, response_format_json: bool = False,
+             max_retries: int = 2) -> str:
+    """调用 OpenAI 兼容的 chat completions 接口（带重试）"""
     if not Config.AI_API_KEY:
         raise AnalyzerError("未配置 AI API Key，请在设置页面填写")
 
-    url = f"{Config.AI_BASE_URL.rstrip('/')}/chat/completions"
+    base_url = Config.AI_BASE_URL.rstrip("/")
+    url = f"{base_url}/chat/completions"
+
     headers = {
         "Authorization": f"Bearer {Config.AI_API_KEY}",
         "Content-Type": "application/json",
@@ -44,21 +51,82 @@ def _call_ai(messages: list, model: str = None, temperature: float = 0.7,
     if response_format_json:
         payload["response_format"] = {"type": "json_object"}
 
-    resp = requests.post(url, headers=headers, json=payload, timeout=120)
-
-    if resp.status_code != 200:
-        error_msg = ""
+    last_error = ""
+    for attempt in range(max_retries + 1):
         try:
-            error_msg = resp.json().get("error", {}).get("message", "")
-        except Exception:
-            error_msg = resp.text[:300]
-        raise AnalyzerError(f"AI 接口调用失败 (HTTP {resp.status_code}): {error_msg}")
+            logger.info(f"AI 调用 (尝试 {attempt + 1}/{max_retries + 1}): model={payload['model']}, url={url}")
 
-    data = resp.json()
-    return data["choices"][0]["message"]["content"]
+            resp = requests.post(url, headers=headers, json=payload, timeout=180)
+
+            if resp.status_code == 200:
+                data = resp.json()
+                content = data["choices"][0]["message"]["content"]
+                logger.info(f"AI 调用成功，返回 {len(content)} 字符")
+                return content
+
+            # 非 200，解析错误信息
+            try:
+                err_data = resp.json()
+                error_msg = err_data.get("error", {})
+                if isinstance(error_msg, dict):
+                    last_error = error_msg.get("message", str(error_msg))
+                else:
+                    last_error = str(error_msg)
+            except Exception:
+                last_error = resp.text[:500]
+
+            logger.warning(f"AI 调用失败 (HTTP {resp.status_code}): {last_error}")
+
+            # 429 限流或 5xx 服务端错误才重试
+            if resp.status_code in (429, 500, 502, 503, 504) and attempt < max_retries:
+                wait = (attempt + 1) * 5
+                logger.info(f"等待 {wait} 秒后重试...")
+                time.sleep(wait)
+                continue
+
+            # 400/401/403/404 等客户端错误不重试，直接报错
+            raise AnalyzerError(
+                f"AI 接口调用失败 (HTTP {resp.status_code}): {last_error}\n"
+                f"请检查：\n"
+                f"- API Key 是否正确\n"
+                f"- Base URL 是否正确（当前: {base_url}）\n"
+                f"- 模型名称是否正确（当前: {payload['model']}）\n"
+                f"- 账户余额是否充足"
+            )
+
+        except requests.exceptions.Timeout:
+            last_error = "请求超时（180秒）"
+            logger.warning(last_error)
+            if attempt < max_retries:
+                time.sleep(5)
+                continue
+            raise AnalyzerError(f"AI 接口请求超时，请稍后重试")
+
+        except requests.exceptions.ConnectionError as e:
+            last_error = str(e)
+            logger.warning(f"连接失败: {last_error}")
+            if attempt < max_retries:
+                time.sleep(5)
+                continue
+            raise AnalyzerError(
+                f"无法连接到 AI 接口: {last_error}\n"
+                f"请检查 Base URL 是否正确: {base_url}"
+            )
+
+        except AnalyzerError:
+            raise
+        except Exception as e:
+            last_error = str(e)
+            logger.error(f"AI 调用异常: {last_error}")
+            if attempt < max_retries:
+                time.sleep(3)
+                continue
+            raise AnalyzerError(f"AI 接口调用异常: {last_error}")
+
+    raise AnalyzerError(f"AI 接口调用失败（已重试 {max_retries + 1} 次）: {last_error}")
 
 
-def _encode_image(path: str, max_size: int = 1280) -> str:
+def _encode_image(path: str, max_size: int = 1024) -> str:
     """将图片编码为 base64 data URL（自动缩放以减小体积）"""
     try:
         from PIL import Image
@@ -73,14 +141,18 @@ def _encode_image(path: str, max_size: int = 1280) -> str:
 
         buf = io.BytesIO()
         img = img.convert("RGB")
-        img.save(buf, format="JPEG", quality=75)
+        img.save(buf, format="JPEG", quality=70)
         b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
         return f"data:image/jpeg;base64,{b64}"
-    except Exception:
+    except Exception as e:
+        logger.warning(f"图片编码失败 {path}: {e}")
         # 回退：直接读取文件
-        with open(path, "rb") as f:
-            b64 = base64.b64encode(f.read()).decode("utf-8")
-        return f"data:image/jpeg;base64,{b64}"
+        try:
+            with open(path, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode("utf-8")
+            return f"data:image/jpeg;base64,{b64}"
+        except Exception:
+            raise
 
 
 # ------------------------------------------------------------------ #
@@ -90,9 +162,6 @@ def analyze_content(frames: List[Tuple[float, str]], subtitle_text: str,
                     video_title: str = "", video_desc: str = "") -> str:
     """
     将采样后的视频画面 + 字幕发送给视觉模型，获取内容分析报告。
-
-    Returns:
-        分析报告文本
     """
     vision_model = Config.AI_VISION_MODEL or Config.AI_MODEL
 
@@ -106,6 +175,9 @@ def analyze_content(frames: List[Tuple[float, str]], subtitle_text: str,
     if video_desc:
         text_intro += f"视频简介：{video_desc}\n"
     if subtitle_text:
+        # 限制字幕长度，避免超出 token 限制
+        if len(subtitle_text) > 3000:
+            subtitle_text = subtitle_text[:3000] + "\n...(字幕过长已截断)"
         text_intro += f"\n字幕内容：\n{subtitle_text}\n"
     text_intro += (
         "\n请仔细观察这些画面并结合字幕，对视频内容进行全面分析，包括：\n"
@@ -120,7 +192,8 @@ def analyze_content(frames: List[Tuple[float, str]], subtitle_text: str,
 
     content_parts.append({"type": "text", "text": text_intro})
 
-    # 添加图片（分批以避免消息过大）
+    # 添加图片
+    img_count = 0
     for timestamp, fpath in frames:
         try:
             data_url = _encode_image(fpath)
@@ -131,8 +204,12 @@ def analyze_content(frames: List[Tuple[float, str]], subtitle_text: str,
                 "type": "image_url",
                 "image_url": {"url": data_url},
             })
-        except Exception:
+            img_count += 1
+        except Exception as e:
+            logger.warning(f"跳过帧 {fpath}: {e}")
             continue
+
+    logger.info(f"内容分析: 发送 {img_count} 张图片, 模型={vision_model}")
 
     messages = [
         {
@@ -156,36 +233,7 @@ def analyze_content(frames: List[Tuple[float, str]], subtitle_text: str,
 # ------------------------------------------------------------------ #
 def generate_script(analysis: str, user_requirements: dict,
                     video_title: str = "") -> dict:
-    """
-    根据内容分析报告 + 用户需求，生成结构化混剪脚本。
-
-    Args:
-        analysis: 阶段一的分析报告
-        user_requirements: 用户需求 dict，包含:
-            - script_topic: 脚本主题/方向
-            - script_style: 剪辑风格
-            - target_duration: 目标时长（如 "2-3分钟"）
-            - orientation: 横版/竖版
-            - extra_notes: 额外要求
-
-    Returns:
-        {
-            "title": "脚本标题",
-            "duration": "2-3分钟",
-            "orientation": "横版",
-            "style_reference": "剪辑风格参考",
-            "rows": [
-                {
-                    "shot_number": "1",
-                    "post_production": "后期处理说明",
-                    "visual_reference": "画面参考描述",
-                    "subtitle_dialogue": "字幕/台词内容",
-                    "notes": "备注"
-                },
-                ...
-            ]
-        }
-    """
+    """根据内容分析报告 + 用户需求，生成结构化混剪脚本。"""
     topic = user_requirements.get("script_topic", "")
     style = user_requirements.get("script_style", "")
     duration = user_requirements.get("target_duration", "2-3分钟")
@@ -260,6 +308,7 @@ def generate_script(analysis: str, user_requirements: dict,
         # 去除可能的 markdown 代码块标记
         raw = raw.strip()
         if raw.startswith("```"):
+            # 去掉第一行（```json 或 ```）
             raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
         if raw.endswith("```"):
             raw = raw[:-3]
@@ -274,7 +323,74 @@ def generate_script(analysis: str, user_requirements: dict,
         return script_data
 
     except json.JSONDecodeError as e:
-        raise AnalyzerError(f"脚本生成结果解析失败: {e}\n原始输出: {raw[:500]}")
+        raise AnalyzerError(f"脚本生成结果解析失败: {e}\n原始输出前500字: {raw[:500]}")
+
+
+# ------------------------------------------------------------------ #
+#  诊断接口
+# ------------------------------------------------------------------ #
+def test_ai_connection() -> dict:
+    """测试 AI 接口连接是否正常，返回诊断信息"""
+    result = {
+        "configured": bool(Config.AI_API_KEY),
+        "base_url": Config.AI_BASE_URL,
+        "model": Config.AI_MODEL,
+        "vision_model": Config.AI_VISION_MODEL or Config.AI_MODEL,
+    }
+
+    if not Config.AI_API_KEY:
+        result["ok"] = False
+        result["error"] = "未配置 AI API Key"
+        return result
+
+    base_url = Config.AI_BASE_URL.rstrip("/")
+    url = f"{base_url}/chat/completions"
+
+    headers = {
+        "Authorization": f"Bearer {Config.AI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    # 发送一个最简单的文本请求测试连接
+    payload = {
+        "model": Config.AI_MODEL,
+        "messages": [{"role": "user", "content": "请回复'连接成功'四个字"}],
+        "max_tokens": 20,
+        "temperature": 0,
+    }
+
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+        result["status_code"] = resp.status_code
+
+        if resp.status_code == 200:
+            data = resp.json()
+            reply = data["choices"][0]["message"]["content"]
+            result["ok"] = True
+            result["reply"] = reply
+            result["message"] = "AI 接口连接正常"
+        else:
+            result["ok"] = False
+            try:
+                err_data = resp.json()
+                error_msg = err_data.get("error", {})
+                if isinstance(error_msg, dict):
+                    error_msg = error_msg.get("message", str(error_msg))
+                result["error"] = f"HTTP {resp.status_code}: {error_msg}"
+            except Exception:
+                result["error"] = f"HTTP {resp.status_code}: {resp.text[:300]}"
+
+    except requests.exceptions.ConnectionError as e:
+        result["ok"] = False
+        result["error"] = f"无法连接到 {url}: {e}"
+    except requests.exceptions.Timeout:
+        result["ok"] = False
+        result["error"] = f"请求超时: {url}"
+    except Exception as e:
+        result["ok"] = False
+        result["error"] = str(e)
+
+    return result
 
 
 # ------------------------------------------------------------------ #
@@ -286,20 +402,7 @@ def analyze_and_generate(frames: List[Tuple[float, str]],
                          video_title: str = "",
                          video_desc: str = "",
                          progress_callback=None) -> dict:
-    """
-    完整的分析 + 生成流程。
-
-    Args:
-        frames: 采样后的帧列表 [(timestamp, path), ...]
-        subtitle_text: 字幕全文
-        user_requirements: 用户需求
-        video_title: 视频标题
-        video_desc: 视频简介
-        progress_callback: 回调 (stage, message)
-
-    Returns:
-        脚本数据 dict
-    """
+    """完整的分析 + 生成流程。"""
     # 阶段一：内容分析
     if progress_callback:
         progress_callback("analyzing", f"正在分析 {len(frames)} 帧画面与字幕...")
