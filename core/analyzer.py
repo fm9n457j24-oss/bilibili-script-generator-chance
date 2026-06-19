@@ -184,54 +184,120 @@ def analyze_content(frames: List[Tuple[float, str]], subtitle_text: str,
                     video_title: str = "", video_desc: str = "") -> str:
     """
     将采样后的视频画面 + 字幕发送给视觉模型，获取内容分析报告。
+
+    针对智谱GLM-4V等限制单次图片数量的模型，采用分批策略：
+    每批发送最多 MAX_IMAGES_PER_BATCH 张图片，最后合并分析结果。
     """
     vision_model = Config.AI_VISION_MODEL or Config.AI_MODEL
 
-    # 构建消息内容
-    content_parts = []
+    # 限制字幕长度
+    if subtitle_text and len(subtitle_text) > 3000:
+        subtitle_text = subtitle_text[:3000] + "\n...(字幕过长已截断)"
 
-    # 文字说明
-    text_intro = (
-        f"以下是来自B站视频《{video_title}》的画面截图（每隔0.5秒截取，已均匀采样）。\n"
-    )
-    if video_desc:
-        text_intro += f"视频简介：{video_desc}\n"
-    if subtitle_text:
-        # 限制字幕长度，避免超出 token 限制
-        if len(subtitle_text) > 3000:
-            subtitle_text = subtitle_text[:3000] + "\n...(字幕过长已截断)"
-        text_intro += f"\n字幕内容：\n{subtitle_text}\n"
-    text_intro += (
-        "\n请仔细观察这些画面并结合字幕，对视频内容进行全面分析，包括：\n"
-        "1. 视频主题与核心内容\n"
-        "2. 画面风格（色调、构图、转场特点）\n"
-        "3. 内容结构与节奏（开头、发展、高潮、结尾）\n"
-        "4. 关键场景描述（标注大致时间点）\n"
-        "5. 情感基调与氛围\n"
-        "6. 字幕/旁白的要点总结\n"
-        "7. 可借鉴的剪辑手法与创意亮点\n"
-    )
-
-    content_parts.append({"type": "text", "text": text_intro})
-
-    # 添加图片
-    img_count = 0
+    # 编码所有图片
+    encoded_frames = []
     for timestamp, fpath in frames:
         try:
             data_url = _encode_image(fpath)
             mm, ss = divmod(int(timestamp), 60)
             label = f"[{mm:02d}:{ss:02d}]"
-            content_parts.append({"type": "text", "text": label})
-            content_parts.append({
-                "type": "image_url",
-                "image_url": {"url": data_url},
-            })
-            img_count += 1
+            encoded_frames.append((label, data_url))
         except Exception as e:
             logger.warning(f"跳过帧 {fpath}: {e}")
             continue
 
-    logger.info(f"内容分析: 发送 {img_count} 张图片, 模型={vision_model}")
+    if not encoded_frames:
+        raise AnalyzerError("没有可用的画面帧用于分析")
+
+    logger.info(f"内容分析: 共 {len(encoded_frames)} 张图片, 模型={vision_model}")
+
+    # 分批处理（每批最多 4 张，留 1 张余量）
+    MAX_IMAGES_PER_BATCH = 4
+    batches = []
+    for i in range(0, len(encoded_frames), MAX_IMAGES_PER_BATCH):
+        batches.append(encoded_frames[i:i + MAX_IMAGES_PER_BATCH])
+
+    logger.info(f"分为 {len(batches)} 批，每批最多 {MAX_IMAGES_PER_BATCH} 张图片")
+
+    # 如果只有一批，直接单次调用
+    if len(batches) == 1:
+        return _analyze_single_batch(batches[0], subtitle_text, video_title, video_desc, vision_model)
+
+    # 多批：逐批分析，最后合并
+    batch_results = []
+    for i, batch in enumerate(batches):
+        batch_num = i + 1
+        total_batches = len(batches)
+        time_range = f"{batch[0][0]} ~ {batch[-1][0]}"
+
+        logger.info(f"分析第 {batch_num}/{total_batches} 批 ({time_range}), {len(batch)} 张图片")
+
+        # 第一批附带字幕和视频信息，后续批次只分析画面
+        batch_subtitle = subtitle_text if i == 0 else ""
+        batch_desc = video_desc if i == 0 else ""
+
+        result = _analyze_single_batch(
+            batch, batch_subtitle, video_title, batch_desc, vision_model,
+            batch_num=batch_num, total_batches=total_batches, time_range=time_range
+        )
+        batch_results.append(result)
+
+    # 合并所有批次的分析结果
+    logger.info("合并所有批次的分析结果...")
+    return _merge_batch_results(batch_results, video_title, subtitle_text, video_desc)
+
+
+def _analyze_single_batch(batch_frames, subtitle_text, video_title, video_desc,
+                          vision_model, batch_num=None, total_batches=None, time_range=None):
+    """分析单批图片"""
+    content_parts = []
+
+    # 文字说明
+    if batch_num and total_batches:
+        text_intro = (
+            f"以下是来自B站视频《{video_title}》的画面截图（第{batch_num}/{total_batches}批，"
+            f"时间段 {time_range}）。\n"
+        )
+    else:
+        text_intro = (
+            f"以下是来自B站视频《{video_title}》的画面截图（每隔0.5秒截取，已均匀采样）。\n"
+        )
+
+    if video_desc:
+        text_intro += f"视频简介：{video_desc}\n"
+    if subtitle_text:
+        text_intro += f"\n字幕内容：\n{subtitle_text}\n"
+
+    if batch_num and total_batches:
+        text_intro += (
+            f"\n请分析这批画面（时间段 {time_range}），包括：\n"
+            "1. 这批画面的主要内容\n"
+            "2. 画面风格（色调、构图）\n"
+            "3. 关键场景描述\n"
+            "4. 情感基调\n"
+            "5. 可借鉴的剪辑手法\n"
+        )
+    else:
+        text_intro += (
+            "\n请仔细观察这些画面并结合字幕，对视频内容进行全面分析，包括：\n"
+            "1. 视频主题与核心内容\n"
+            "2. 画面风格（色调、构图、转场特点）\n"
+            "3. 内容结构与节奏（开头、发展、高潮、结尾）\n"
+            "4. 关键场景描述（标注大致时间点）\n"
+            "5. 情感基调与氛围\n"
+            "6. 字幕/旁白的要点总结\n"
+            "7. 可借鉴的剪辑手法与创意亮点\n"
+        )
+
+    content_parts.append({"type": "text", "text": text_intro})
+
+    # 添加本批图片
+    for label, data_url in batch_frames:
+        content_parts.append({"type": "text", "text": label})
+        content_parts.append({
+            "type": "image_url",
+            "image_url": {"url": data_url},
+        })
 
     messages = [
         {
@@ -248,6 +314,43 @@ def analyze_content(frames: List[Tuple[float, str]], subtitle_text: str,
     ]
 
     return _call_ai(messages, model=vision_model, temperature=0.5, max_tokens=1024)
+
+
+def _merge_batch_results(batch_results, video_title, subtitle_text, video_desc):
+    """将多批次的分析结果合并为一份完整报告"""
+    combined = "\n\n---\n\n".join(
+        f"【第{i+1}批分析】\n{r}" for i, r in enumerate(batch_results)
+    )
+
+    prompt = f"""以下是对B站视频《{video_title}》分批进行画面分析的结果。
+{"视频简介：" + video_desc if video_desc else ""}
+{"字幕内容：" + subtitle_text[:1500] if subtitle_text else ""}
+
+请将以下分批分析结果整合为一份完整、连贯的视频内容分析报告，包括：
+1. 视频主题与核心内容
+2. 画面风格（色调、构图、转场特点）
+3. 内容结构与节奏（开头、发展、高潮、结尾）
+4. 关键场景描述（标注大致时间点）
+5. 情感基调与氛围
+6. 字幕/旁白的要点总结
+7. 可借鉴的剪辑手法与创意亮点
+
+分批分析结果：
+{combined}
+
+请输出整合后的完整分析报告："""
+
+    messages = [
+        {
+            "role": "system",
+            "content": "你是一位专业的视频内容分析师，擅长将分段分析整合为完整报告。",
+        },
+        {"role": "user", "content": prompt},
+    ]
+
+    # 合并阶段使用文本模型（不需要视觉），max_tokens 可以更大
+    text_model = Config.AI_MODEL
+    return _call_ai(messages, model=text_model, temperature=0.5, max_tokens=4096)
 
 
 # ------------------------------------------------------------------ #
