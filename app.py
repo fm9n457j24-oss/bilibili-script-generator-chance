@@ -6,6 +6,8 @@ B站视频混剪脚本生成器 —— Flask Web 应用
 部署模式：
   - 本地开发：python app.py，通过网页设置配置 API Key
   - Docker/云部署：通过环境变量预配置 API Key，终端用户直接使用
+
+任务存储：使用文件型存储（core/task_store.py），支持 gunicorn 多 worker 共享状态。
 """
 
 import os
@@ -13,7 +15,6 @@ import uuid
 import json
 import logging
 import threading
-import traceback
 from datetime import datetime
 from functools import wraps
 
@@ -24,13 +25,14 @@ from core.downloader import download_video, DownloadError
 from core.extractor import extract_frames, sample_frames_for_vision, cleanup_frames
 from core.analyzer import analyze_and_generate, AnalyzerError
 from core.docx_writer import generate_docx
+from core.task_store import create_task, update_task, get_task, cleanup_old_tasks
 
 # ------------------------------------------------------------------ #
 #  日志配置
 # ------------------------------------------------------------------ #
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
+    format="%(asctime)s [%(levelname)s] [%(process)d] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
@@ -40,21 +42,14 @@ app.secret_key = os.environ.get("SECRET_KEY", "bili-script-gen-secret-2024")
 
 Config.ensure_dirs()
 
+
 # ------------------------------------------------------------------ #
-#  任务追踪（内存存储，适用于单机使用）
+#  后台任务处理
 # ------------------------------------------------------------------ #
-_tasks = {}
-_tasks_lock = threading.Lock()
-
-
-def _update_task(task_id, **kwargs):
-    with _tasks_lock:
-        if task_id in _tasks:
-            _tasks[task_id].update(kwargs)
-
-
 def _process_task(task_id, params):
-    """后台处理线程：下载 → 截帧 → 分析 → 生成脚本 → 输出 DOCX"""
+    """后台处理线程：下载 → 截帧 → 分析 → 生成脚本 → 输出 DOCX
+    任务状态通过文件存储共享，所有 gunicorn worker 都能读取。
+    """
     try:
         url = params["url"]
         requirements = {
@@ -71,24 +66,24 @@ def _process_task(task_id, params):
         logger.info(f"任务 {task_id} 开始: {url}")
 
         # ---- 阶段 1：下载视频 ----
-        _update_task(task_id, status="downloading", message="正在解析视频链接并下载视频...",
-                     progress=5)
+        update_task(task_id, status="downloading", message="正在解析视频链接并下载视频...",
+                    progress=5)
 
         def dl_progress(downloaded, total):
             if total > 0:
                 pct = min(25, 5 + int(downloaded / total * 20))
-                _update_task(task_id, progress=pct,
-                             message=f"正在下载视频... {downloaded // 1024}KB / {total // 1024}KB")
+                update_task(task_id, progress=pct,
+                            message=f"正在下载视频... {downloaded // 1024}KB / {total // 1024}KB")
 
         video_info = download_video(url, task_dir, progress_callback=dl_progress)
 
-        _update_task(task_id, progress=28,
-                     message=f"视频下载完成：{video_info.title}",
-                     video_info=video_info.to_dict())
+        update_task(task_id, progress=28,
+                    message=f"视频下载完成：{video_info.title}",
+                    video_info=video_info.to_dict())
 
         # ---- 阶段 2：截取画面 ----
-        _update_task(task_id, status="extracting", message="正在每隔0.5秒截取视频画面...",
-                     progress=30)
+        update_task(task_id, status="extracting", message="正在每隔0.5秒截取视频画面...",
+                    progress=30)
 
         frames_dir = os.path.join(task_dir, "frames")
         all_frames = extract_frames(video_info.video_path, frames_dir)
@@ -96,22 +91,22 @@ def _process_task(task_id, params):
         if not all_frames:
             raise RuntimeError("截帧失败，未获取到任何画面")
 
-        _update_task(task_id, progress=45,
-                     message=f"截取完成，共 {len(all_frames)} 帧画面")
+        update_task(task_id, progress=45,
+                    message=f"截取完成，共 {len(all_frames)} 帧画面")
 
         # 采样用于 AI 分析
         sampled = sample_frames_for_vision(all_frames)
 
         # ---- 阶段 3：AI 内容分析 ----
-        _update_task(task_id, status="analyzing",
-                     message=f"正在发送 {len(sampled)} 帧画面给 AI 进行内容分析...",
-                     progress=50)
+        update_task(task_id, status="analyzing",
+                    message=f"正在发送 {len(sampled)} 帧画面给 AI 进行内容分析...",
+                    progress=50)
 
         def analysis_progress(stage, msg):
             if stage == "analyzing":
-                _update_task(task_id, progress=55, message=msg)
+                update_task(task_id, progress=55, message=msg)
             elif stage == "generating":
-                _update_task(task_id, progress=80, message=msg)
+                update_task(task_id, progress=80, message=msg)
 
         script_data = analyze_and_generate(
             frames=sampled,
@@ -123,8 +118,8 @@ def _process_task(task_id, params):
         )
 
         # ---- 阶段 4：生成 DOCX ----
-        _update_task(task_id, status="generating", message="正在生成 Word 脚本文档...",
-                     progress=92)
+        update_task(task_id, status="generating", message="正在生成 Word 脚本文档...",
+                    progress=92)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_title = "".join(c for c in video_info.title if c not in r'\/:*?"<>|')[:30]
@@ -135,14 +130,14 @@ def _process_task(task_id, params):
 
         # ---- 完成 ----
         logger.info(f"任务 {task_id} 完成: {filename}")
-        _update_task(task_id, status="done", message="脚本生成完成！",
-                     progress=100,
-                     result={
-                         "filename": filename,
-                         "script_data": script_data,
-                         "video_info": video_info.to_dict(),
-                         "frame_count": len(all_frames),
-                     })
+        update_task(task_id, status="done", message="脚本生成完成！",
+                    progress=100,
+                    result={
+                        "filename": filename,
+                        "script_data": script_data,
+                        "video_info": video_info.to_dict(),
+                        "frame_count": len(all_frames),
+                    })
 
         # 清理临时文件
         try:
@@ -154,14 +149,13 @@ def _process_task(task_id, params):
 
     except DownloadError as e:
         logger.error(f"任务 {task_id} 下载失败: {e}")
-        _update_task(task_id, status="error", message=f"下载失败: {e}", progress=0)
+        update_task(task_id, status="error", message=f"下载失败: {e}", progress=0)
     except AnalyzerError as e:
         logger.error(f"任务 {task_id} AI分析失败: {e}")
-        _update_task(task_id, status="error", message=f"AI 分析失败: {e}", progress=0)
+        update_task(task_id, status="error", message=f"AI 分析失败: {e}", progress=0)
     except Exception as e:
         logger.error(f"任务 {task_id} 处理失败: {e}")
-        _update_task(task_id, status="error",
-                     message=f"处理失败: {e}", progress=0)
+        update_task(task_id, status="error", message=f"处理失败: {e}", progress=0)
 
 
 # ------------------------------------------------------------------ #
@@ -248,14 +242,15 @@ def api_generate():
 
     task_id = str(uuid.uuid4())[:8]
 
-    with _tasks_lock:
-        _tasks[task_id] = {
-            "status": "pending",
-            "message": "任务已创建，等待处理...",
-            "progress": 0,
-            "created_at": datetime.now().isoformat(),
-        }
+    # 创建任务文件（所有 worker 共享）
+    create_task(task_id, {
+        "status": "pending",
+        "message": "任务已创建，等待处理...",
+        "progress": 0,
+        "created_at": datetime.now().isoformat(),
+    })
 
+    # 启动后台线程处理（线程在当前 worker 内运行，状态写入文件供其他 worker 读取）
     thread = threading.Thread(target=_process_task, args=(task_id, data), daemon=True)
     thread.start()
 
@@ -265,8 +260,8 @@ def api_generate():
 
 @app.route("/api/status/<task_id>")
 def api_status(task_id):
-    with _tasks_lock:
-        task = _tasks.get(task_id, None)
+    # 从文件读取任务状态（任何 worker 都能读到）
+    task = get_task(task_id)
 
     if task is None:
         return jsonify({"error": "任务不存在"}), 404
@@ -296,6 +291,9 @@ def preview(filename):
 #  入口
 # ------------------------------------------------------------------ #
 if __name__ == "__main__":
+    # 启动时清理旧任务
+    cleanup_old_tasks(max_age_hours=2)
+
     print(f"{'=' * 50}")
     print(f"  B站视频混剪脚本生成器")
     print(f"  访问地址: http://127.0.0.1:{Config.PORT}")
@@ -303,6 +301,7 @@ if __name__ == "__main__":
     print(f"  AI 已配置: {'是' if Config.AI_API_KEY else '否（请在网页设置中配置）'}")
     print(f"  预配置模式: {'是（环境变量配置）' if Config.is_preconfigured() else '否'}")
     print(f"  管理员密码: {'已设置' if Config.ADMIN_PASSWORD else '未设置'}")
+    print(f"  任务存储: 文件型（支持多 worker）")
     print(f"{'=' * 50}")
 
     app.run(host=Config.HOST, port=Config.PORT, debug=False, threaded=True)
