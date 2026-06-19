@@ -41,12 +41,15 @@ def _get(key, default=""):
 
 class Config:
     # ======================== AI 接口配置 ========================
-    # 支持 OpenAI 兼容接口（OpenAI / DeepSeek / 通义千问 / Moonshot 等）
+    # 默认使用智谱 AI（GLM），国内可直接访问，glm-4-flash 永久免费
+    # 也支持 OpenAI / DeepSeek / 通义千问 / Moonshot 等 OpenAI 兼容接口
     AI_API_KEY = _get("ai_api_key", "")
-    AI_BASE_URL = _get("ai_base_url", "https://api.openai.com/v1")
-    AI_MODEL = _get("ai_model", "gpt-4o")
+    AI_BASE_URL = _get("ai_base_url", "https://open.bigmodel.cn/api/paas/v4/")
+    AI_MODEL = _get("ai_model", "glm-4-flash")
     # 视觉分析使用的模型（需支持图片输入），留空则与 AI_MODEL 相同
-    AI_VISION_MODEL = _get("ai_vision_model", "")
+    # 智谱: glm-4v-flash (免费) / glm-4v / glm-4v-plus
+    # 通义千问: qwen-vl-plus / qwen-vl-max
+    AI_VISION_MODEL = _get("ai_vision_model", "glm-4v-flash")
 
     # ======================== B站配置 ========================
     # 可选：填入登录后的 SESSDATA cookie 值，可下载更高清晰度

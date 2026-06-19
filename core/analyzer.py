@@ -29,7 +29,11 @@ class AnalyzerError(Exception):
 def _call_ai(messages: list, model: str = None, temperature: float = 0.7,
              max_tokens: int = 4096, response_format_json: bool = False,
              max_retries: int = 2) -> str:
-    """调用 OpenAI 兼容的 chat completions 接口（带重试）"""
+    """调用 OpenAI 兼容的 chat completions 接口（带重试）
+
+    兼容智谱GLM / 通义千问 / DeepSeek / OpenAI 等。
+    如果 response_format 导致 400 错误，会自动移除该参数重试。
+    """
     if not Config.AI_API_KEY:
         raise AnalyzerError("未配置 AI API Key，请在设置页面填写")
 
@@ -48,7 +52,8 @@ def _call_ai(messages: list, model: str = None, temperature: float = 0.7,
         "max_tokens": max_tokens,
     }
 
-    if response_format_json:
+    use_response_format = response_format_json
+    if use_response_format:
         payload["response_format"] = {"type": "json_object"}
 
     last_error = ""
@@ -76,6 +81,13 @@ def _call_ai(messages: list, model: str = None, temperature: float = 0.7,
                 last_error = resp.text[:500]
 
             logger.warning(f"AI 调用失败 (HTTP {resp.status_code}): {last_error}")
+
+            # 如果是 400 错误且使用了 response_format，可能是模型不支持，移除后重试
+            if resp.status_code == 400 and use_response_format:
+                logger.info("可能是 response_format 不被支持，移除该参数后重试...")
+                payload.pop("response_format", None)
+                use_response_format = False
+                continue
 
             # 429 限流或 5xx 服务端错误才重试
             if resp.status_code in (429, 500, 502, 503, 504) and attempt < max_retries:

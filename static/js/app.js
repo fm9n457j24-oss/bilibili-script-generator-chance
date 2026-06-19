@@ -5,6 +5,34 @@ let pollTimer = null;
 // 是否为预配置模式
 let isPreconfigured = false;
 
+// 模型预设方案
+const MODEL_PRESETS = {
+    zhipu: {
+        baseUrl: "https://open.bigmodel.cn/api/paas/v4/",
+        model: "glm-4-flash",
+        visionModel: "glm-4v-flash",
+        apiKeyPlaceholder: "智谱API Key (xxx.xxx格式)",
+    },
+    qwen: {
+        baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        model: "qwen-plus",
+        visionModel: "qwen-vl-plus",
+        apiKeyPlaceholder: "通义千问API Key (sk-xxx格式)",
+    },
+    deepseek: {
+        baseUrl: "https://api.deepseek.com",
+        model: "deepseek-chat",
+        visionModel: "deepseek-chat",
+        apiKeyPlaceholder: "DeepSeekAPI Key (sk-xxx格式)",
+    },
+    openai: {
+        baseUrl: "https://api.openai.com/v1",
+        model: "gpt-4o",
+        visionModel: "gpt-4o",
+        apiKeyPlaceholder: "OpenAI API Key (sk-xxx格式)",
+    },
+};
+
 // ------------------------------------------------------------------ //
 //  初始化
 // ------------------------------------------------------------------ //
@@ -15,6 +43,11 @@ document.addEventListener("DOMContentLoaded", () => {
     document.getElementById("btnGenerate").addEventListener("click", startGenerate);
     document.getElementById("btnAdminLogin").addEventListener("click", adminLogin);
     document.getElementById("btnTestAi").addEventListener("click", testAiConnection);
+
+    // 模型预设按钮
+    document.querySelectorAll(".btn-preset").forEach(btn => {
+        btn.addEventListener("click", () => applyPreset(btn.dataset.preset));
+    });
 });
 
 // ------------------------------------------------------------------ //
@@ -25,6 +58,17 @@ function toggleSettings() {
     panel.style.display = panel.style.display === "none" ? "block" : "none";
 }
 
+function applyPreset(presetName) {
+    const preset = MODEL_PRESETS[presetName];
+    if (!preset) return;
+
+    document.getElementById("aiBaseUrl").value = preset.baseUrl;
+    document.getElementById("aiModel").value = preset.model;
+    document.getElementById("aiVisionModel").value = preset.visionModel;
+    document.getElementById("aiApiKey").placeholder = preset.apiKeyPlaceholder;
+    document.getElementById("configStatus").textContent = `已选择 ${presetName} 方案，请填写 API Key 后保存`;
+}
+
 async function loadConfig() {
     try {
         const resp = await fetch("/api/config");
@@ -32,10 +76,10 @@ async function loadConfig() {
 
         isPreconfigured = data.preconfigured;
 
-        // 填充表单
-        document.getElementById("aiBaseUrl").value = data.ai_base_url || "https://api.openai.com/v1";
-        document.getElementById("aiModel").value = data.ai_model || "gpt-4o";
-        document.getElementById("aiVisionModel").value = data.ai_vision_model || "";
+        // 填充表单（默认使用智谱 GLM）
+        document.getElementById("aiBaseUrl").value = data.ai_base_url || "https://open.bigmodel.cn/api/paas/v4/";
+        document.getElementById("aiModel").value = data.ai_model || "glm-4-flash";
+        document.getElementById("aiVisionModel").value = data.ai_vision_model || "glm-4v-flash";
 
         if (data.configured) {
             document.getElementById("statusBadge").style.display = "inline-block";
@@ -96,8 +140,8 @@ async function adminLogin() {
 async function saveConfig() {
     const data = {
         ai_api_key: document.getElementById("aiApiKey").value.trim(),
-        ai_base_url: document.getElementById("aiBaseUrl").value.trim() || "https://api.openai.com/v1",
-        ai_model: document.getElementById("aiModel").value.trim() || "gpt-4o",
+        ai_base_url: document.getElementById("aiBaseUrl").value.trim() || "https://open.bigmodel.cn/api/paas/v4/",
+        ai_model: document.getElementById("aiModel").value.trim() || "glm-4-flash",
         ai_vision_model: document.getElementById("aiVisionModel").value.trim(),
         bili_sessdata: document.getElementById("biliSessdata").value.trim(),
     };
