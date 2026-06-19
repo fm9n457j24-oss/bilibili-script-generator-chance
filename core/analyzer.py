@@ -89,6 +89,16 @@ def _call_ai(messages: list, model: str = None, temperature: float = 0.7,
                 use_response_format = False
                 continue
 
+            # 如果是 400 错误且涉及 max_tokens 限制，自动降低后重试
+            if resp.status_code == 400 and "max_tokens" in last_error.lower():
+                import re
+                m = re.search(r'(\d+)', last_error)
+                new_limit = int(m.group(1)) if m else 1024
+                if payload.get("max_tokens", 0) > new_limit:
+                    logger.info(f"max_tokens 超限，降低为 {new_limit} 后重试...")
+                    payload["max_tokens"] = new_limit
+                    continue
+
             # 429 限流或 5xx 服务端错误才重试
             if resp.status_code in (429, 500, 502, 503, 504) and attempt < max_retries:
                 wait = (attempt + 1) * 5
@@ -237,7 +247,7 @@ def analyze_content(frames: List[Tuple[float, str]], subtitle_text: str,
         },
     ]
 
-    return _call_ai(messages, model=vision_model, temperature=0.5, max_tokens=4096)
+    return _call_ai(messages, model=vision_model, temperature=0.5, max_tokens=1024)
 
 
 # ------------------------------------------------------------------ #
