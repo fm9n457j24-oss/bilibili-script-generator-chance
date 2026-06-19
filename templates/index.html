@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>B站视频混剪脚本生成器</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="app-container">
+        <!-- 顶部标题栏 -->
+        <header class="app-header">
+            <div class="header-content">
+                <div class="logo-area">
+                    <span class="logo-icon">🎬</span>
+                    <div>
+                        <h1>B站视频混剪脚本生成器</h1>
+                        <p class="subtitle">输入B站链接 → AI分析画面与字幕 → 自动生成混剪脚本</p>
+                    </div>
+                </div>
+                <div class="header-actions">
+                    <span class="status-badge" id="statusBadge" style="display:none;">✓ 已就绪</span>
+                    <button class="btn-settings" id="btnToggleSettings">⚙️ 设置</button>
+                </div>
+            </div>
+        </header>
+
+        <!-- 设置面板 -->
+        <section class="settings-panel" id="settingsPanel" style="display:none;">
+            <div class="card">
+                <h2>⚙️ AI 接口配置</h2>
+                <div id="settingsContent">
+                    <p class="hint" id="settingsHint">支持 OpenAI 兼容接口（OpenAI / DeepSeek / 通义千问 / Moonshot 等）。视觉分析需使用支持图片的模型（如 GPT-4o）。</p>
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label>API Key</label>
+                            <input type="password" id="aiApiKey" placeholder="sk-...">
+                        </div>
+                        <div class="form-group">
+                            <label>API Base URL</label>
+                            <input type="text" id="aiBaseUrl" placeholder="https://api.openai.com/v1">
+                        </div>
+                        <div class="form-group">
+                            <label>文本模型</label>
+                            <input type="text" id="aiModel" placeholder="gpt-4o">
+                        </div>
+                        <div class="form-group">
+                            <label>视觉模型（留空则同上）</label>
+                            <input type="text" id="aiVisionModel" placeholder="gpt-4o">
+                        </div>
+                        <div class="form-group full-width">
+                            <label>B站 SESSDATA（可选，用于下载高清晰度）</label>
+                            <input type="password" id="biliSessdata" placeholder="登录B站后在开发者工具Cookie中获取">
+                        </div>
+                    </div>
+                    <div class="form-actions">
+                        <button class="btn btn-primary" id="btnSaveConfig">保存配置</button>
+                        <span class="config-status" id="configStatus"></span>
+                    </div>
+                </div>
+
+                <!-- 预配置模式提示 -->
+                <div id="preconfiguredNotice" style="display:none;">
+                    <div class="notice-box">
+                        <p>🔒 此服务由管理员预配置，AI 接口已通过环境变量设置。</p>
+                        <p class="hint">终端用户无需配置即可直接使用。如需修改配置，请联系服务管理员。</p>
+                        <div id="adminLoginArea" style="display:none; margin-top:16px;">
+                            <div class="form-group full-width">
+                                <label>管理员密码</label>
+                                <input type="password" id="adminPassword" placeholder="输入管理员密码以修改配置">
+                            </div>
+                            <button class="btn btn-primary" id="btnAdminLogin">管理员登录</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 主内容区 -->
+        <main class="main-content">
+            <!-- 输入表单 -->
+            <section class="card input-card">
+                <h2>📝 创建混剪脚本</h2>
+                <div class="form-group full-width">
+                    <label>B站视频链接 <span class="required">*</span></label>
+                    <input type="text" id="videoUrl" class="large-input"
+                           placeholder="粘贴B站视频链接，如 https://www.bilibili.com/video/BV1xx411c7mD">
+                </div>
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label>脚本主题/方向</label>
+                        <input type="text" id="scriptTopic" placeholder="如：励志成长、旅行记录、产品展示">
+                    </div>
+                    <div class="form-group">
+                        <label>剪辑风格</label>
+                        <input type="text" id="scriptStyle" placeholder="如：快节奏卡点、电影感叙事">
+                    </div>
+                    <div class="form-group">
+                        <label>目标时长</label>
+                        <select id="targetDuration">
+                            <option value="1-2分钟">1-2分钟</option>
+                            <option value="2-3分钟" selected>2-3分钟</option>
+                            <option value="3-5分钟">3-5分钟</option>
+                            <option value="5-10分钟">5-10分钟</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>画面方向</label>
+                        <select id="orientation">
+                            <option value="横版" selected>横版（16:9）</option>
+                            <option value="竖版">竖版（9:16）</option>
+                        </select>
+                    </div>
+                    <div class="form-group full-width">
+                        <label>额外要求（可选）</label>
+                        <textarea id="extraNotes" rows="2" placeholder="如：需要加入旁白、特定BGM节奏、情绪转折等"></textarea>
+                    </div>
+                </div>
+                <div class="form-actions">
+                    <button class="btn btn-primary btn-large" id="btnGenerate">🚀 生成混剪脚本</button>
+                </div>
+            </section>
+
+            <!-- 进度区域 -->
+            <section class="card progress-card" id="progressCard" style="display:none;">
+                <h2>📊 处理进度</h2>
+                <div class="progress-steps">
+                    <div class="step" data-step="downloading">
+                        <span class="step-icon">⬇️</span>
+                        <span class="step-label">下载视频</span>
+                    </div>
+                    <div class="step-arrow">→</div>
+                    <div class="step" data-step="extracting">
+                        <span class="step-icon">🖼️</span>
+                        <span class="step-label">截取画面</span>
+                    </div>
+                    <div class="step-arrow">→</div>
+                    <div class="step" data-step="analyzing">
+                        <span class="step-icon">🧠</span>
+                        <span class="step-label">AI分析</span>
+                    </div>
+                    <div class="step-arrow">→</div>
+                    <div class="step" data-step="generating">
+                        <span class="step-icon">📄</span>
+                        <span class="step-label">生成脚本</span>
+                    </div>
+                </div>
+                <div class="progress-bar-container">
+                    <div class="progress-bar" id="progressBar" style="width:0%"></div>
+                </div>
+                <p class="progress-message" id="progressMessage">等待开始...</p>
+            </section>
+
+            <!-- 错误提示 -->
+            <section class="card error-card" id="errorCard" style="display:none;">
+                <h2>❌ 出错了</h2>
+                <pre id="errorMessage"></pre>
+                <button class="btn btn-secondary" onclick="document.getElementById('errorCard').style.display='none'">关闭</button>
+            </section>
+
+            <!-- 结果区域 -->
+            <section class="card result-card" id="resultCard" style="display:none;">
+                <h2>✅ 脚本生成完成</h2>
+                <div class="result-info" id="resultInfo"></div>
+                <div class="result-actions">
+                    <a class="btn btn-primary btn-large" id="downloadLink" href="#">📥 下载 Word 文档</a>
+                </div>
+                <div class="script-preview" id="scriptPreview"></div>
+            </section>
+        </main>
+
+        <footer class="app-footer">
+            <p>B站视频混剪脚本生成器 · 仅供学习交流使用 · 请勿用于商业用途</p>
+        </footer>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

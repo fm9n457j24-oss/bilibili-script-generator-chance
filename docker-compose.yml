@@ -1,0 +1,38 @@
+# ============================================================ #
+#  Docker Compose 部署配置
+#  使用方法：docker-compose up -d
+# ============================================================ #
+
+version: "3.8"
+
+services:
+  bilibili-script-generator:
+    build: .
+    container_name: bili-script-gen
+    ports:
+      - "5000:5000"
+    environment:
+      # ====== AI 接口配置（必填）======
+      # 部署者在此填入 API Key，终端用户无需配置
+      - AI_API_KEY=${AI_API_KEY:-}
+      - AI_BASE_URL=${AI_BASE_URL:-https://api.openai.com/v1}
+      - AI_MODEL=${AI_MODEL:-gpt-4o}
+      - AI_VISION_MODEL=${AI_VISION_MODEL:-gpt-4o}
+
+      # ====== B站配置（可选）======
+      - BILI_SESSDATA=${BILI_SESSDATA:-}
+
+      # ====== 管理员密码（可选，保护设置页面）======
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+
+    volumes:
+      # 持久化生成的脚本文件
+      - ./outputs:/app/outputs
+      # 持久化配置文件（可选）
+      - ./config.json:/app/config.json
+    restart: unless-stopped
+    # 资源限制（视频处理需要较多内存）
+    deploy:
+      resources:
+        limits:
+          memory: 2G
