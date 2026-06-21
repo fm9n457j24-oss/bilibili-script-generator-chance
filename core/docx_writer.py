@@ -78,12 +78,18 @@ def generate_docx(script_data: dict, output_path: str) -> str:
     duration = script_data.get("duration", "2-3分钟")
     orientation = script_data.get("orientation", "横版")
     style_ref = script_data.get("style_reference", "")
+    hook_type = script_data.get("hook_type", "")
+    script_structure = script_data.get("script_structure", "")
 
     info_lines = [
         f"时长：{duration}",
         f"横/竖板：{orientation}",
         f"剪辑风格参考：{style_ref}",
     ]
+    if hook_type:
+        info_lines.append(f"开头钩子类型：{hook_type}")
+    if script_structure:
+        info_lines.append(f"脚本结构：{script_structure}")
     for line in info_lines:
         p = doc.add_paragraph()
         run = p.add_run(line)
